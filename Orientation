@@ -1,0 +1,125 @@
+import numpy as np
+from PIL import Image
+
+
+# ----------------------------
+# Resize for fast scoring
+# ----------------------------
+
+def downscale_for_scoring(pil_img: Image.Image, max_long_edge: int = 1100) -> Image.Image:
+    w, h = pil_img.size
+    long_edge = max(w, h)
+
+    if long_edge <= max_long_edge:
+        return pil_img
+
+    scale = max_long_edge / long_edge
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    if hasattr(Image, "Resampling"):
+        return pil_img.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+    return pil_img.resize((new_w, new_h), resample=Image.BICUBIC)
+
+
+# ----------------------------
+# Rotate helper
+# ----------------------------
+
+def rotate_pil(pil_img: Image.Image, angle: int) -> Image.Image:
+    if angle % 360 == 0:
+        return pil_img
+    return pil_img.rotate(angle, expand=True)
+
+
+# ----------------------------
+# Score OCR results
+# ----------------------------
+
+def score_easyocr_results(results, conf_th: float = 0.0):
+    confs = []
+    total_chars = 0
+
+    for bbox, text, conf in results:
+        if conf is None or conf < conf_th:
+            continue
+
+        confs.append(float(conf))
+
+        if isinstance(text, str):
+            total_chars += len(text)
+
+    if not confs:
+        return 0.0, {
+            "median_conf": 0.0,
+            "mean_conf": 0.0,
+            "n_boxes": 0,
+            "total_chars": 0,
+        }
+
+    median_conf = float(np.median(confs))
+    mean_conf = float(np.mean(confs))
+    n_boxes = len(confs)
+
+    score = (
+        (median_conf * 2.0)
+        + (min(n_boxes, 40) * 0.05)
+        + (min(total_chars, 400) * 0.0025)
+    )
+
+    return score, {
+        "median_conf": median_conf,
+        "mean_conf": mean_conf,
+        "n_boxes": n_boxes,
+        "total_chars": total_chars,
+    }
+
+
+# ----------------------------
+# Main Orientation Function
+# ----------------------------
+
+def best_rotation_by_easyocr(
+    pil_img: Image.Image,
+    reader,
+    angles=(0, 90, -90),
+    max_long_edge: int = 1100,
+    conf_th: float = 0.0
+):
+    """
+    Tries multiple rotations and selects the best one based on OCR score.
+    Returns:
+        rotated_image,
+        best_angle,
+        best_stats,
+        per_angle_stats
+    """
+
+    small = downscale_for_scoring(pil_img, max_long_edge=max_long_edge)
+
+    best_score = float("-inf")
+    best_angle = 0
+    best_stats = None
+    per_angle = []
+
+    for angle in angles:
+        rotated_small = rotate_pil(small, angle)
+
+        ocr_results = reader.readtext(np.array(rotated_small))
+        score, stats = score_easyocr_results(ocr_results, conf_th=conf_th)
+
+        per_angle.append({
+            "angle": angle,
+            "score": score,
+            **stats
+        })
+
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+            best_stats = stats
+
+    rotated_full = rotate_pil(pil_img, best_angle)
+
+    return rotated_full, best_angle, best_stats, per_angle
